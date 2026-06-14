@@ -91,9 +91,9 @@ class AnomalyDetector:
                     "Train with: ids/train_ids_colab.ipynb on VeReMi NextGen dataset."
                 )
         except ImportError:
-            logger.warning(
-                "TensorFlow not installed (pip install tensorflow). "
-                "Running in rule-only mode."
+            logger.info(
+                "TensorFlow not installed — IDS running in rule-only mode. "
+                "Install with: pip install tensorflow"
             )
 
         # --- K-Means Sybil model (sklearn) ---

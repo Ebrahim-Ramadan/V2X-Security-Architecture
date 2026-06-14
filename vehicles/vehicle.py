@@ -202,7 +202,7 @@ class Vehicle:
             ds.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if sys.platform == "win32":
                 ds.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            dashboard_host = os.environ.get("DASHBOARD_HOST", "dashboard")
+            dashboard_host = os.environ.get("DASHBOARD_HOST", "localhost")
             dashboard_port = int(os.environ.get("DASHBOARD_PORT", "5008"))
             ds.sendto(message.encode(), (dashboard_host, dashboard_port))
             ds.close()
