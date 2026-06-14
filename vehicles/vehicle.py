@@ -275,7 +275,7 @@ def main():
             if count % 2 == 0:
                 cam = vehicle.generate_cam()
                 vehicle.broadcast_message(cam)
-            if count % 10 == 0:
+            if count % 5 == 0:
                 denm = vehicle.generate_denm()
                 vehicle.broadcast_message(denm)
             time.sleep(1)
