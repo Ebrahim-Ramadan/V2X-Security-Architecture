@@ -138,14 +138,15 @@ def stats():
     cam_count = sum(1 for m in messages if m.get('type') == 'CAM')
     denm_count = sum(1 for m in messages if m.get('type') == 'DENM')
     classical_count = sum(1 for m in messages if m.get('crypto') == 'classical')
-    pqc_count = sum(1 for m in messages if m.get('crypto') == 'post_quantum')
-    
+    # Accept both 'post_quantum' (current) and legacy 'pqc' label
+    pqc_count = sum(1 for m in messages if m.get('crypto') in ('post_quantum', 'pqc'))
+
     return jsonify({
         "total_messages": len(messages),
         "cam_messages": cam_count,
         "denm_messages": denm_count,
         "classical_crypto": classical_count,
-        "post_quantum_crypto": pqc_count
+        "post_quantum_crypto": pqc_count,
     })
 
 # --- New API Endpoints for Enhanced Dashboard ---
@@ -199,9 +200,9 @@ def api_components():
 def api_chart_distribution():
     # Calculate real distribution from messages if available, else mock
     classical_count = sum(1 for m in messages if m.get('crypto') == 'classical')
-    pqc_count = sum(1 for m in messages if m.get('crypto') == 'post_quantum')
+    pqc_count = sum(1 for m in messages if m.get('crypto') in ('post_quantum', 'pqc'))
     total = classical_count + pqc_count
-    
+
     if total == 0:
         # Default mock values from screenshot
         return jsonify([

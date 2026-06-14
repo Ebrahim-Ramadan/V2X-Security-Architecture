@@ -127,6 +127,18 @@ services:
     ports:
       - "6379:6379"
 
+  # IDS Service
+  ids:
+    build: .
+    command: python ids/service.py
+    volumes:
+      - ./ids:/app/ids
+    ports:
+      - "5010:5010"
+    depends_on:
+      - vehicle-1
+      - vehicle-2
+
   # Web Dashboard
   dashboard:
     build: .
@@ -139,6 +151,7 @@ services:
       - vehicle-1
       - vehicle-2
       - rse-1
+      - ids
 
 volumes:
   postgres_data:
