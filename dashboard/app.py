@@ -61,7 +61,7 @@ def udp_listener():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ UDP listener started on port 5008")
         
         while True:
-            data, addr = sock.recvfrom(1024)
+            data, addr = sock.recvfrom(65535)
             try:
                 msg = json.loads(data.decode())
 
