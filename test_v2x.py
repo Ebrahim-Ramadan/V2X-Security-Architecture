@@ -4,9 +4,9 @@ V2X Architecture Integration Tests
 Covers:
   - Real ECDSA-P256 CAM sign / verify
   - Real CRYSTALS-Dilithium3 DENM sign / verify
+  - Tamper detection (signature rejection)
   - Crypto benchmark output
-  - IDS anomaly detector (rule-based path, no trained models needed)
-  - Tamper-detection (signature rejection)
+  - All 7 vehicle profiles (type, position, events)
   - SCMS health endpoints (when services are running)
 """
 
@@ -15,134 +15,141 @@ import time
 import sys
 import requests
 
+from vehicles.vehicle import Vehicle, VEHICLE_PROFILES, EVENT_SEVERITY, PQC_AVAILABLE
+
 
 # ---------------------------------------------------------------------------
-# Crypto tests (no external services needed)
+# Crypto tests
 # ---------------------------------------------------------------------------
 
 def test_cam_real_ecdsa():
-    """CAM messages must be signed with real ECDSA-P256-SHA256."""
-    from vehicles.vehicle import Vehicle
     v = Vehicle(1)
     cam_json = v.generate_cam()
     msg = json.loads(cam_json)
 
-    assert msg["crypto"] == "classical", "CAM must use classical crypto label"
-    assert "signature" in msg, "CAM must carry a signature field"
-    assert "public_key" in msg, "CAM must carry the signer public key"
-    assert len(bytes.fromhex(msg["signature"])) > 50, "ECDSA sig should be >50 bytes"
-
-    ok = v.verify_cam(cam_json)
-    assert ok, "CAM signature verification must pass"
+    assert msg["crypto"] == "classical"
+    assert len(bytes.fromhex(msg["signature"])) > 50
+    assert "public_key" in msg
+    assert v.verify_cam(cam_json) is True
     print("  PASS  CAM ECDSA-P256 sign/verify")
 
 
 def test_denm_real_dilithium3():
-    """DENM messages must be signed with real CRYSTALS-Dilithium3."""
-    from vehicles.vehicle import Vehicle, PQC_AVAILABLE
-    v = Vehicle(2)
+    v = Vehicle(1)
     denm_json = v.generate_denm()
     msg = json.loads(denm_json)
 
-    assert msg["crypto"] == "post_quantum", "DENM must use post_quantum crypto label"
-    assert "signature" in msg
-    assert "public_key" in msg
+    assert msg["crypto"] == "post_quantum"
 
     if PQC_AVAILABLE:
         assert msg["pqc_algorithm"] == "CRYSTALS-DILITHIUM3"
         import base64
         sig_len = len(base64.b64decode(msg["signature"]))
         assert sig_len > 3000, f"Dilithium3 sig should be ~3293B, got {sig_len}B"
-
-        ok = v.verify_denm(denm_json)
-        assert ok, "DENM Dilithium3 verification must pass"
+        assert v.verify_denm(denm_json) is True
         print("  PASS  DENM CRYSTALS-Dilithium3 sign/verify")
     else:
-        print("  SKIP  dilithium-py not installed — install with: pip install dilithium-py")
+        print("  SKIP  dilithium-py not installed")
 
 
 def test_tamper_detection():
-    """Mutating message content must invalidate both CAM and DENM signatures."""
-    from vehicles.vehicle import Vehicle
-    v = Vehicle(3)
+    v = Vehicle(1)
 
     # Tamper CAM
-    cam_msg = json.loads(v.generate_cam())
-    cam_msg["data"]["speed"] = 999.9  # forged value
-    tampered = json.dumps(cam_msg)
-    assert not v.verify_cam(tampered), "Tampered CAM must fail verification"
+    cam = json.loads(v.generate_cam())
+    cam["data"]["speed"] = 9999.9
+    assert v.verify_cam(json.dumps(cam)) is False
     print("  PASS  CAM tamper detection")
 
     # Tamper DENM
-    from vehicles.vehicle import PQC_AVAILABLE
     if PQC_AVAILABLE:
-        denm_msg = json.loads(v.generate_denm())
-        denm_msg["data"]["severity"] = 99  # forged severity
-        tampered_denm = json.dumps(denm_msg)
-        result = v.verify_denm(tampered_denm)
-        assert result is False, "Tampered DENM must fail verification"
+        denm = json.loads(v.generate_denm())
+        denm["data"]["severity"] = 99
+        assert v.verify_denm(json.dumps(denm)) is False
         print("  PASS  DENM tamper detection")
 
 
 def test_benchmark():
-    """Benchmark must return timing and size data for both algorithms."""
-    from vehicles.vehicle import Vehicle, PQC_AVAILABLE
-    v = Vehicle(4)
+    v = Vehicle(1)
     results = v.benchmark_crypto(iterations=5)
 
-    assert "ECDSA-P256-SHA256" in results
     ecdsa = results["ECDSA-P256-SHA256"]
     assert ecdsa["sig_size_bytes"] > 0
     assert ecdsa["quantum_safe"] is False
 
     if PQC_AVAILABLE:
-        assert "CRYSTALS-DILITHIUM3" in results
         dil = results["CRYSTALS-DILITHIUM3"]
         assert dil["sig_size_bytes"] > 3000
         assert dil["quantum_safe"] is True
-        print(f"  PASS  Benchmark: ECDSA={ecdsa['sign_ms']}ms/{ecdsa['sig_size_bytes']}B  "
-              f"Dilithium3={dil['sign_ms']}ms/{dil['sig_size_bytes']}B")
+        print(
+            f"  PASS  Benchmark: "
+            f"ECDSA={ecdsa['sign_ms']}ms/{ecdsa['sig_size_bytes']}B  "
+            f"Dilithium3={dil['sign_ms']}ms/{dil['sig_size_bytes']}B"
+        )
     else:
-        print(f"  PASS  Benchmark (ECDSA only): {ecdsa['sign_ms']}ms / {ecdsa['sig_size_bytes']}B")
+        print(f"  PASS  Benchmark (ECDSA only): {ecdsa['sign_ms']}ms/{ecdsa['sig_size_bytes']}B")
 
 
 # ---------------------------------------------------------------------------
-# IDS tests (no models needed — exercises rule-based path)
+# Multi-vehicle profile tests
 # ---------------------------------------------------------------------------
 
-def test_ids_rule_based():
-    """IDS rule-based detector must flag physically-impossible messages."""
-    from ids.detection.anomaly_detector import detect, detect_sybil
+def test_all_vehicle_profiles():
+    """Every vehicle ID 1-7 must produce valid signed messages."""
+    for vid in range(1, 8):
+        v = Vehicle(vid)
+        profile = VEHICLE_PROFILES[vid]
 
-    # Normal CAM — should not flag
-    normal = {"data": {"message_type": "CAM", "vehicle_id": "V-1",
-                       "speed": 60.0, "heading": 90.0, "acceleration": 0.0,
-                       "severity": 0, "position": [42.33, -83.04]},
-              "crypto": "classical"}
-    result = detect(normal)
-    assert not result["anomaly_detected"], "Normal CAM should not trigger anomaly"
+        # Correct type loaded
+        assert v.vehicle_type == profile["type"], \
+            f"Vehicle {vid} type mismatch: {v.vehicle_type} != {profile['type']}"
 
-    # Impossible speed — should flag FDI
-    bad_speed = {"data": {"message_type": "CAM", "vehicle_id": "V-2",
-                          "speed": 9999.0, "heading": 0.0, "acceleration": 0.0,
-                          "severity": 0, "position": [42.33, -83.04]},
-                 "crypto": "classical"}
-    result = detect(bad_speed)
-    assert result["anomaly_detected"], "Impossible speed must trigger FDI flag"
-    assert result["attack_type"] == "FDI"
-    print(f"  PASS  IDS FDI rule (speed=9999): score={result['anomaly_score']}")
+        # CAM carries vehicle_type and position
+        cam = json.loads(v.generate_cam())
+        assert cam["data"]["vehicle_type"] == profile["type"]
+        assert cam["data"]["position"] is not None
+        assert v.verify_cam(json.dumps(cam)) is True, f"CAM sig invalid for vehicle {vid}"
 
-    # Sybil: same position, different IDs
-    messages = [
-        {"data": {"vehicle_id": f"V-{i}", "message_type": "CAM",
-                  "speed": 50.0, "heading": 0.0, "acceleration": 0.0,
-                  "severity": 0, "position": [42.33, -83.04]},
-         "crypto": "classical"}
-        for i in range(4)
-    ]
-    sybil = detect_sybil(messages)
-    assert sybil["sybil_detected"], "Same-position cluster must trigger Sybil flag"
-    print(f"  PASS  IDS Sybil rule: suspects={sybil['suspicious_vehicles']}")
+        # DENM event must be one of the profile's events
+        denm = json.loads(v.generate_denm())
+        event = denm["data"]["event_type"]
+        assert event in profile["events"], \
+            f"Vehicle {vid} DENM event '{event}' not in profile events {profile['events']}"
+
+        if PQC_AVAILABLE:
+            assert v.verify_denm(json.dumps(denm)) is True, f"DENM sig invalid for vehicle {vid}"
+
+    print("  PASS  All 7 vehicle profiles: types, events, signatures verified")
+
+
+def test_position_movement():
+    """Vehicle position must update after calling _update_position."""
+    v = Vehicle(1)
+    lat0, lon0 = v.lat, v.lon
+    for _ in range(5):
+        v._update_position()
+    assert (v.lat, v.lon) != (lat0, lon0), "Position did not change after movement"
+    print(f"  PASS  Position movement: ({lat0:.6f},{lon0:.6f}) -> ({v.lat:.6f},{v.lon:.6f})")
+
+
+def test_event_severity():
+    """DENM severity must match the EVENT_SEVERITY table."""
+    v = Vehicle(5)  # emergency vehicle — highest severity
+    for _ in range(10):
+        denm = json.loads(v.generate_denm())
+        event    = denm["data"]["event_type"]
+        severity = denm["data"]["severity"]
+        assert severity == EVENT_SEVERITY[event], \
+            f"Severity mismatch for '{event}': got {severity}, expected {EVENT_SEVERITY[event]}"
+    print("  PASS  DENM severity matches event type table")
+
+
+def test_vehicle_types_covered():
+    """All four vehicle types (car, truck, emergency, bus) must be in the fleet."""
+    types = {VEHICLE_PROFILES[vid]["type"] for vid in range(1, 8)}
+    for expected in ("car", "truck", "emergency", "bus"):
+        assert expected in types, f"Vehicle type '{expected}' missing from fleet"
+    print(f"  PASS  Fleet covers all types: {sorted(types)}")
 
 
 # ---------------------------------------------------------------------------
@@ -150,14 +157,12 @@ def test_ids_rule_based():
 # ---------------------------------------------------------------------------
 
 def test_scms_services():
-    """Health-check all SCMS services. Skips gracefully if not running."""
     services = {
         "Root CA":           "http://localhost:5001/health",
         "Intermediate CA":   "http://localhost:5002/health",
         "Registration Auth": "http://localhost:5003/health",
         "Misbehavior Auth":  "http://localhost:5004/health",
         "PCA":               "http://localhost:5005/health",
-        "IDS Service":       "http://localhost:5010/health",
     }
     any_up = False
     for name, url in services.items():
@@ -169,14 +174,12 @@ def test_scms_services():
             else:
                 print(f"  WARN  {name}: HTTP {r.status_code}")
         except Exception:
-            print(f"  DOWN  {name}: not reachable (start services first)")
-
+            print(f"  DOWN  {name}: not reachable")
     if not any_up:
-        print("  INFO  No SCMS services are running. Start with: docker-compose up")
+        print("  INFO  No SCMS services running — start with: docker-compose up")
 
 
 def test_pca_cert_issuance():
-    """PCA must issue a verifiable ECDSA-signed pseudonym certificate."""
     try:
         r = requests.post(
             "http://localhost:5005/issue_pseudonym_cert",
@@ -188,18 +191,16 @@ def test_pca_cert_issuance():
             return
         cert = r.json()
         assert cert["status"] == "issued"
-        assert "pca_signature" in cert, "Cert must have a real ECDSA PCA signature"
-        assert len(cert["pca_signature"]) > 100, "PCA signature must be non-trivial"
+        assert len(cert["pca_signature"]) > 100
         assert "pseudonym_public_key" in cert
         print(f"  PASS  PCA issued cert {cert['certificate_id'][:30]}...")
 
-        # Verify the cert via the /verify_cert endpoint
         v_resp = requests.post("http://localhost:5005/verify_cert", json=cert, timeout=3)
         if v_resp.status_code == 200:
             assert v_resp.json()["valid"] is True
-            print("  PASS  PCA cert signature verified by /verify_cert")
+            print("  PASS  PCA cert verified by /verify_cert")
     except requests.ConnectionError:
-        print("  SKIP  PCA not reachable (start with docker-compose up)")
+        print("  SKIP  PCA not reachable")
 
 
 # ---------------------------------------------------------------------------
@@ -207,18 +208,21 @@ def test_pca_cert_issuance():
 # ---------------------------------------------------------------------------
 
 TESTS = [
-    ("CAM ECDSA sign/verify",            test_cam_real_ecdsa),
-    ("DENM Dilithium3 sign/verify",       test_denm_real_dilithium3),
-    ("Tamper detection",                  test_tamper_detection),
-    ("Crypto benchmark",                  test_benchmark),
-    ("IDS rule-based detection",          test_ids_rule_based),
-    ("SCMS service health checks",        test_scms_services),
-    ("PCA pseudonym cert issuance",       test_pca_cert_issuance),
+    ("CAM ECDSA sign/verify",          test_cam_real_ecdsa),
+    ("DENM Dilithium3 sign/verify",    test_denm_real_dilithium3),
+    ("Tamper detection",               test_tamper_detection),
+    ("Crypto benchmark",               test_benchmark),
+    ("All 7 vehicle profiles",         test_all_vehicle_profiles),
+    ("Position movement",              test_position_movement),
+    ("DENM event severity mapping",    test_event_severity),
+    ("Fleet vehicle types coverage",   test_vehicle_types_covered),
+    ("SCMS service health checks",     test_scms_services),
+    ("PCA pseudonym cert issuance",    test_pca_cert_issuance),
 ]
 
 
 def main():
-    print("\n=== V2X Security Architecture — Integration Tests ===\n")
+    print("\n=== V2X Security Architecture -- Integration Tests ===\n")
     passed = failed = 0
     for name, fn in TESTS:
         print(f"[{name}]")

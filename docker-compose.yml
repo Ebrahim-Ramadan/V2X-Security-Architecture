@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # SCMS Components
+  # ── SCMS Components ──────────────────────────────────────────────────────────
   root-ca:
     build: .
     command: python scms/root_ca.py
@@ -35,7 +35,7 @@ services:
     environment:
       - ICA_URL=http://intermediate-ca:5002
     ports:
-      - "5005:5005"  # Changed to 5005 to avoid conflict
+      - "5005:5005"
 
   linkage-auth-1:
     build: .
@@ -78,40 +78,86 @@ services:
     ports:
       - "5004:5004"
 
-  # Vehicle and Infrastructure Nodes
+  # ── Vehicles ─────────────────────────────────────────────────────────────────
   vehicle-1:
     build: .
     command: python vehicles/vehicle.py --id 1
     volumes:
       - ./vehicles:/app/vehicles
-      - ./data/vehicles:/app/data/vehicles
-    depends_on:
-      - ra
-      - ma
+    depends_on: [ra, ma]
     environment:
-      - RA_URL=http://ra:5003
-      - MA_URL=http://ma:5004
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
 
   vehicle-2:
     build: .
     command: python vehicles/vehicle.py --id 2
     volumes:
       - ./vehicles:/app/vehicles
-      - ./data/vehicles:/app/data/vehicles
-    depends_on:
-      - ra
-      - ma
+    depends_on: [ra, ma]
+    environment:
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
 
+  vehicle-3:
+    build: .
+    command: python vehicles/vehicle.py --id 3
+    volumes:
+      - ./vehicles:/app/vehicles
+    depends_on: [ra, ma]
+    environment:
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
+
+  vehicle-4:
+    build: .
+    command: python vehicles/vehicle.py --id 4
+    volumes:
+      - ./vehicles:/app/vehicles
+    depends_on: [ra, ma]
+    environment:
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
+
+  vehicle-5:
+    build: .
+    command: python vehicles/vehicle.py --id 5
+    volumes:
+      - ./vehicles:/app/vehicles
+    depends_on: [ra, ma]
+    environment:
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
+
+  vehicle-6:
+    build: .
+    command: python vehicles/vehicle.py --id 6
+    volumes:
+      - ./vehicles:/app/vehicles
+    depends_on: [ra, ma]
+    environment:
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
+
+  vehicle-7:
+    build: .
+    command: python vehicles/vehicle.py --id 7
+    volumes:
+      - ./vehicles:/app/vehicles
+    depends_on: [ra, ma]
+    environment:
+      - DASHBOARD_HOST=dashboard
+      - DASHBOARD_PORT=5008
+
+  # ── Infrastructure ────────────────────────────────────────────────────────────
   rse-1:
     build: .
     command: python infrastructure/rse.py --id 1
     volumes:
       - ./infrastructure:/app/infrastructure
-    depends_on:
-      - ra
-      - ma
+    depends_on: [ra, ma]
 
-  # Database
+  # ── Database ──────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:14
     environment:
@@ -127,19 +173,7 @@ services:
     ports:
       - "6379:6379"
 
-  # IDS Service
-  ids:
-    build: .
-    command: python ids/service.py
-    volumes:
-      - ./ids:/app/ids
-    ports:
-      - "5010:5010"
-    depends_on:
-      - vehicle-1
-      - vehicle-2
-
-  # Web Dashboard
+  # ── Dashboard ─────────────────────────────────────────────────────────────────
   dashboard:
     build: .
     command: python dashboard/app.py
@@ -150,9 +184,12 @@ services:
     depends_on:
       - vehicle-1
       - vehicle-2
+      - vehicle-3
+      - vehicle-4
+      - vehicle-5
+      - vehicle-6
+      - vehicle-7
       - rse-1
-      - ids
 
 volumes:
   postgres_data:
-

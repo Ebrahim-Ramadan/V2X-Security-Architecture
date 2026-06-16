@@ -1,6 +1,8 @@
 import json
 import logging
 import time
+import math
+import random
 import hashlib
 import argparse
 import base64
@@ -8,11 +10,9 @@ import os
 import sys
 import socket
 import threading
-import datetime
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-import requests
 
 # Real CRYSTALS-Dilithium3 (NIST PQC standard) via dilithium-py
 try:
@@ -20,18 +20,104 @@ try:
     PQC_AVAILABLE = True
 except ImportError:
     PQC_AVAILABLE = False
-    logging.warning("dilithium-py not installed — install with: pip install dilithium-py")
+    logging.warning("dilithium-py not installed -- install with: pip install dilithium-py")
 
 if sys.platform == "win32":
     BROADCAST_ADDR = "255.255.255.255"
 else:
     BROADCAST_ADDR = "<broadcast>"
 
+# ---------------------------------------------------------------------------
+# Vehicle profiles — realistic types, positions, speeds, headings
+# Detroit area highway (I-94 corridor) + urban grid
+# ---------------------------------------------------------------------------
+VEHICLE_PROFILES = {
+    1: {
+        "type": "car",
+        "speed": 72.0,     # km/h
+        "heading": 90.0,   # East
+        "lat": 42.3314,
+        "lon": -83.0458,
+        "events": ["emergency_braking", "accident"],
+    },
+    2: {
+        "type": "car",
+        "speed": 65.0,
+        "heading": 88.0,
+        "lat": 42.3320,
+        "lon": -83.0520,
+        "events": ["obstacle", "accident"],
+    },
+    3: {
+        "type": "truck",
+        "speed": 48.0,
+        "heading": 270.0,  # West (opposite lane)
+        "lat": 42.3308,
+        "lon": -83.0390,
+        "events": ["slow_vehicle", "roadwork"],
+    },
+    4: {
+        "type": "car",
+        "speed": 80.0,
+        "heading": 45.0,   # North-East (on-ramp)
+        "lat": 42.3350,
+        "lon": -83.0470,
+        "events": ["emergency_braking", "hazard"],
+    },
+    5: {
+        "type": "emergency",
+        "speed": 110.0,
+        "heading": 90.0,
+        "lat": 42.3295,
+        "lon": -83.0600,
+        "events": ["emergency_vehicle"],
+    },
+    6: {
+        "type": "bus",
+        "speed": 38.0,
+        "heading": 180.0,  # South (urban route)
+        "lat": 42.3340,
+        "lon": -83.0480,
+        "events": ["passenger_boarding", "obstacle"],
+    },
+    7: {
+        "type": "truck",
+        "speed": 44.0,
+        "heading": 92.0,
+        "lat": 42.3302,
+        "lon": -83.0550,
+        "events": ["slow_vehicle", "obstacle", "roadwork"],
+    },
+}
+
+EVENT_SEVERITY = {
+    "accident":               8,
+    "emergency_braking":      7,
+    "emergency_vehicle":      9,
+    "obstacle":               5,
+    "hazard":                 6,
+    "slow_vehicle":           3,
+    "roadwork":               4,
+    "passenger_boarding":     2,
+}
+
 
 class Vehicle:
     def __init__(self, vehicle_id, ra_url="http://localhost:5003"):
         self.vehicle_id = vehicle_id
         self.ra_url = ra_url
+
+        # Load profile (fallback to generic car if ID not in table)
+        profile = VEHICLE_PROFILES.get(vehicle_id, {
+            "type": "car", "speed": 60.0, "heading": 90.0,
+            "lat": 42.3314, "lon": -83.0458, "events": ["accident"],
+        })
+        self.vehicle_type = profile["type"]
+        self.speed        = profile["speed"]
+        self.heading      = profile["heading"]
+        self.lat          = profile["lat"]
+        self.lon          = profile["lon"]
+        self.denm_events  = profile["events"]
 
         # Classical crypto for CAM: ECDSA-P256
         self.cam_private_key = ec.generate_private_key(ec.SECP256R1())
@@ -45,18 +131,26 @@ class Vehicle:
             self.pqc_public_key, self.pqc_secret_key = Dilithium3.keygen()
             self.pqc_public_key_b64 = base64.b64encode(self.pqc_public_key).decode()
             logging.info(
-                f"Vehicle {vehicle_id}: Dilithium3 key pair generated "
+                f"Vehicle {vehicle_id} ({self.vehicle_type}): "
+                f"Dilithium3 key pair generated "
                 f"(pk={len(self.pqc_public_key)}B, sk={len(self.pqc_secret_key)}B)"
             )
         else:
-            self.pqc_public_key = b""
-            self.pqc_secret_key = None
+            self.pqc_public_key     = b""
+            self.pqc_secret_key     = None
             self.pqc_public_key_b64 = ""
 
-        self.setup_windows_sockets()
-        logging.info(f"Vehicle {vehicle_id} initialized on {sys.platform}")
+        self._setup_socket()
+        logging.info(
+            f"Vehicle {vehicle_id} ({self.vehicle_type}) initialized | "
+            f"speed={self.speed} km/h heading={self.heading} deg"
+        )
 
-    def setup_windows_sockets(self):
+    # ------------------------------------------------------------------
+    # Socket setup
+    # ------------------------------------------------------------------
+
+    def _setup_socket(self):
         try:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -67,40 +161,65 @@ class Vehicle:
         except Exception as e:
             logging.error(f"Socket setup failed: {e}")
 
+    # ------------------------------------------------------------------
+    # Movement simulation
+    # ------------------------------------------------------------------
+
+    def _update_position(self):
+        """Move vehicle one second forward based on speed and heading."""
+        heading_rad  = math.radians(self.heading)
+        speed_m_per_s = self.speed / 3.6
+        # 1 deg lat ~ 111,320 m; 1 deg lon ~ 111,320 * cos(lat) m
+        self.lat += (speed_m_per_s * math.cos(heading_rad)) / 111_320.0
+        self.lon += (speed_m_per_s * math.sin(heading_rad)) / (
+            111_320.0 * math.cos(math.radians(self.lat))
+        )
+        # Small realistic speed variation
+        self.speed = max(0.0, self.speed + random.uniform(-0.8, 0.8))
+
+    # ------------------------------------------------------------------
+    # Message generation
+    # ------------------------------------------------------------------
+
     def generate_cam(self):
         """Generate CAM signed with real ECDSA-P256-SHA256."""
         cam_data = {
-            "message_type": "CAM",
-            "vehicle_id": self.vehicle_id,
-            "timestamp": time.time(),
-            "position": [42.3314, -83.0458],
-            "speed": 60.5,
-            "heading": 90.0,
-            "acceleration": 0.0,
-            "crypto_type": "ECDSA-P256-SHA256",
+            "message_type":  "CAM",
+            "vehicle_id":    self.vehicle_id,
+            "vehicle_type":  self.vehicle_type,
+            "timestamp":     time.time(),
+            "position":      [round(self.lat, 6), round(self.lon, 6)],
+            "speed":         round(self.speed, 1),
+            "heading":       round(self.heading, 1),
+            "acceleration":  round(random.uniform(-1.0, 1.0), 2),
+            "crypto_type":   "ECDSA-P256-SHA256",
         }
 
         msg_bytes = json.dumps(cam_data, sort_keys=True).encode()
         sig_bytes = self.cam_private_key.sign(msg_bytes, ec.ECDSA(hashes.SHA256()))
 
         return json.dumps({
-            "data": cam_data,
-            "signature": sig_bytes.hex(),
+            "data":       cam_data,
+            "signature":  sig_bytes.hex(),
             "public_key": self.cam_public_key_hex,
-            "crypto": "classical",
+            "crypto":     "classical",
         })
 
-    def generate_denm(self, event_type="accident", severity=3):
+    def generate_denm(self):
         """Generate DENM signed with real CRYSTALS-Dilithium3."""
+        event    = random.choice(self.denm_events)
+        severity = EVENT_SEVERITY.get(event, 5)
+
         denm_data = {
             "message_type": "DENM",
-            "vehicle_id": self.vehicle_id,
-            "event_type": event_type,
-            "severity": severity,
-            "position": [42.3314, -83.0458],
-            "timestamp": time.time(),
-            "validity": time.time() + 300,
-            "crypto_type": "CRYSTALS-DILITHIUM3" if PQC_AVAILABLE else "SHA512-SIM",
+            "vehicle_id":   self.vehicle_id,
+            "vehicle_type": self.vehicle_type,
+            "event_type":   event,
+            "severity":     severity,
+            "position":     [round(self.lat, 6), round(self.lon, 6)],
+            "timestamp":    time.time(),
+            "validity":     time.time() + 300,
+            "crypto_type":  "CRYSTALS-DILITHIUM3" if PQC_AVAILABLE else "SHA512-SIM",
         }
 
         msg_bytes = json.dumps(denm_data, sort_keys=True).encode()
@@ -110,70 +229,67 @@ class Vehicle:
             signature = base64.b64encode(sig_bytes).decode()
             algorithm = "CRYSTALS-DILITHIUM3"
         else:
-            # Fallback so the system still runs if dilithium-py is absent
             signature = hashlib.sha512(msg_bytes).hexdigest()
             algorithm = "SHA512-SIM"
 
         return json.dumps({
-            "data": denm_data,
-            "signature": signature,
-            "public_key": self.pqc_public_key_b64,
-            "crypto": "post_quantum",
+            "data":          denm_data,
+            "signature":     signature,
+            "public_key":    self.pqc_public_key_b64,
+            "crypto":        "post_quantum",
             "pqc_algorithm": algorithm,
         })
 
-    def verify_cam(self, cam_json: str) -> bool:
-        """Verify a CAM message's ECDSA-P256 signature."""
-        try:
-            msg = json.loads(cam_json)
-            cam_data = msg["data"]
-            sig_bytes = bytes.fromhex(msg["signature"])
-            pub_bytes = bytes.fromhex(msg["public_key"])
+    # ------------------------------------------------------------------
+    # Signature verification
+    # ------------------------------------------------------------------
 
-            pub_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub_bytes)
-            msg_bytes = json.dumps(cam_data, sort_keys=True).encode()
-            pub_key.verify(sig_bytes, msg_bytes, ec.ECDSA(hashes.SHA256()))
+    def verify_cam(self, cam_json: str) -> bool:
+        try:
+            msg     = json.loads(cam_json)
+            sig     = bytes.fromhex(msg["signature"])
+            pub     = bytes.fromhex(msg["public_key"])
+            pub_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)
+            pub_key.verify(sig, json.dumps(msg["data"], sort_keys=True).encode(),
+                           ec.ECDSA(hashes.SHA256()))
             return True
         except Exception:
             return False
 
     def verify_denm(self, denm_json: str):
-        """Verify a DENM message's Dilithium3 signature. Returns None if library absent."""
         if not PQC_AVAILABLE:
             return None
         try:
-            msg = json.loads(denm_json)
-            denm_data = msg["data"]
-            sig_bytes = base64.b64decode(msg["signature"])
-            pub_key = base64.b64decode(msg["public_key"])
-            msg_bytes = json.dumps(denm_data, sort_keys=True).encode()
-            return Dilithium3.verify(pub_key, msg_bytes, sig_bytes)
+            msg      = json.loads(denm_json)
+            sig      = base64.b64decode(msg["signature"])
+            pub_key  = base64.b64decode(msg["public_key"])
+            msg_bytes = json.dumps(msg["data"], sort_keys=True).encode()
+            return Dilithium3.verify(pub_key, msg_bytes, sig)
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Benchmark
+    # ------------------------------------------------------------------
+
     def benchmark_crypto(self, iterations: int = 50) -> dict:
-        """
-        Benchmark ECDSA-P256 vs CRYSTALS-Dilithium3 sign performance.
-        Returns a dict suitable for logging or paper tables.
-        """
         results = {}
         payload = b"V2X benchmark payload - ETSI ITS V2X message"
 
-        # ECDSA-P256-SHA256
         key = ec.generate_private_key(ec.SECP256R1())
-        t0 = time.perf_counter()
+        t0  = time.perf_counter()
         for _ in range(iterations):
             key.sign(payload, ec.ECDSA(hashes.SHA256()))
-        ecdsa_ms = (time.perf_counter() - t0) / iterations * 1000
+        ecdsa_ms   = (time.perf_counter() - t0) / iterations * 1000
         sample_sig = key.sign(payload, ec.ECDSA(hashes.SHA256()))
-        pub_bytes = key.public_key().public_bytes(
+        pub_bytes  = key.public_key().public_bytes(
             serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint
         )
         results["ECDSA-P256-SHA256"] = {
-            "sign_ms": round(ecdsa_ms, 3),
-            "sig_size_bytes": len(sample_sig),
+            "sign_ms":          round(ecdsa_ms, 3),
+            "sig_size_bytes":   len(sample_sig),
             "pub_key_size_bytes": len(pub_bytes),
-            "quantum_safe": False,
+            "quantum_safe":     False,
         }
 
         if PQC_AVAILABLE:
@@ -181,20 +297,23 @@ class Vehicle:
             t0 = time.perf_counter()
             for _ in range(iterations):
                 Dilithium3.sign(sk, payload)
-            dil_ms = (time.perf_counter() - t0) / iterations * 1000
+            dil_ms     = (time.perf_counter() - t0) / iterations * 1000
             sample_dil = Dilithium3.sign(sk, payload)
             results["CRYSTALS-DILITHIUM3"] = {
-                "sign_ms": round(dil_ms, 3),
-                "sig_size_bytes": len(sample_dil),
+                "sign_ms":            round(dil_ms, 3),
+                "sig_size_bytes":     len(sample_dil),
                 "pub_key_size_bytes": len(pk),
-                "quantum_safe": True,
-                "security_level": "NIST Level 3",
+                "quantum_safe":       True,
+                "security_level":     "NIST Level 3",
             }
 
         return results
 
+    # ------------------------------------------------------------------
+    # Broadcast
+    # ------------------------------------------------------------------
+
     def broadcast_message(self, message: str):
-        """Broadcast via UDP and forward to the dashboard."""
         try:
             self.udp_socket.sendto(message.encode(), (BROADCAST_ADDR, self.broadcast_port))
 
@@ -213,8 +332,7 @@ class Vehicle:
 
     def start_listening(self):
         self.listening = True
-        t = threading.Thread(target=self._listen_thread, daemon=True)
-        t.start()
+        threading.Thread(target=self._listen_thread, daemon=True).start()
 
     def _listen_thread(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -223,7 +341,7 @@ class Vehicle:
         while self.listening:
             try:
                 data, addr = sock.recvfrom(65535)
-                logging.info(f"Vehicle {self.vehicle_id} rx from {addr}: {data[:60]}...")
+                logging.debug(f"Vehicle {self.vehicle_id} rx from {addr}: {data[:60]}...")
             except socket.timeout:
                 continue
             except Exception as e:
@@ -231,14 +349,16 @@ class Vehicle:
         sock.close()
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(description="V2X Vehicle Node")
-    parser.add_argument("--id", type=int, required=True, help="Vehicle ID")
-    parser.add_argument("--ra-url", default="http://localhost:5003")
-    parser.add_argument(
-        "--benchmark", action="store_true",
-        help="Run ECDSA vs Dilithium3 benchmark and exit",
-    )
+    parser.add_argument("--id",        type=int, required=True)
+    parser.add_argument("--ra-url",    default="http://localhost:5003")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Run ECDSA vs Dilithium3 benchmark and exit")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -254,9 +374,8 @@ def main():
 
     if args.benchmark:
         print("\n=== V2X Cryptographic Benchmark ===")
-        print(f"Iterations per algorithm: 50\n")
-        results = vehicle.benchmark_crypto()
-        for algo, d in results.items():
+        print("Iterations per algorithm: 50\n")
+        for algo, d in vehicle.benchmark_crypto().items():
             print(f"{algo}:")
             print(f"  Signing time   : {d['sign_ms']:.3f} ms/op")
             print(f"  Signature size : {d['sig_size_bytes']} bytes")
@@ -269,20 +388,31 @@ def main():
 
     vehicle.start_listening()
 
+    profile = VEHICLE_PROFILES.get(args.id, {})
+    logging.info(
+        f"Starting vehicle {args.id} | type={vehicle.vehicle_type} | "
+        f"speed={vehicle.speed:.1f} km/h | heading={vehicle.heading} deg"
+    )
+
     try:
         count = 0
         while True:
+            vehicle._update_position()
+
+            # CAM every 2 seconds
             if count % 2 == 0:
-                cam = vehicle.generate_cam()
-                vehicle.broadcast_message(cam)
+                vehicle.broadcast_message(vehicle.generate_cam())
+
+            # DENM every 5 seconds
             if count % 5 == 0:
-                denm = vehicle.generate_denm()
-                vehicle.broadcast_message(denm)
+                vehicle.broadcast_message(vehicle.generate_denm())
+
             time.sleep(1)
             count += 1
+
     except KeyboardInterrupt:
         vehicle.listening = False
-        logging.info("Vehicle stopped")
+        logging.info(f"Vehicle {args.id} stopped")
 
 
 if __name__ == "__main__":
