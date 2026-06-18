@@ -14,9 +14,9 @@ import threading
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-# Real CRYSTALS-Dilithium3 (NIST PQC standard) via dilithium-py
+# Real CRYSTALS-Dilithium2 (NIST PQC standard) via dilithium-py
 try:
-    from dilithium_py.dilithium import Dilithium3
+    from dilithium_py.dilithium import Dilithium2
     PQC_AVAILABLE = True
 except ImportError:
     PQC_AVAILABLE = False
@@ -126,13 +126,13 @@ class Vehicle:
             serialization.PublicFormat.CompressedPoint,
         ).hex()
 
-        # Post-quantum crypto for DENM: CRYSTALS-Dilithium3
+        # Post-quantum crypto for DENM: CRYSTALS-Dilithium2
         if PQC_AVAILABLE:
-            self.pqc_public_key, self.pqc_secret_key = Dilithium3.keygen()
+            self.pqc_public_key, self.pqc_secret_key = Dilithium2.keygen()
             self.pqc_public_key_b64 = base64.b64encode(self.pqc_public_key).decode()
             logging.info(
                 f"Vehicle {vehicle_id} ({self.vehicle_type}): "
-                f"Dilithium3 key pair generated "
+                f"Dilithium2 key pair generated "
                 f"(pk={len(self.pqc_public_key)}B, sk={len(self.pqc_secret_key)}B)"
             )
         else:
@@ -206,7 +206,7 @@ class Vehicle:
         })
 
     def generate_denm(self):
-        """Generate DENM signed with real CRYSTALS-Dilithium3."""
+        """Generate DENM signed with real CRYSTALS-Dilithium2."""
         event    = random.choice(self.denm_events)
         severity = EVENT_SEVERITY.get(event, 5)
 
@@ -219,15 +219,15 @@ class Vehicle:
             "position":     [round(self.lat, 6), round(self.lon, 6)],
             "timestamp":    time.time(),
             "validity":     time.time() + 300,
-            "crypto_type":  "CRYSTALS-DILITHIUM3" if PQC_AVAILABLE else "SHA512-SIM",
+            "crypto_type":  "CRYSTALS-DILITHIUM2" if PQC_AVAILABLE else "SHA512-SIM",
         }
 
         msg_bytes = json.dumps(denm_data, sort_keys=True).encode()
 
         if PQC_AVAILABLE:
-            sig_bytes = Dilithium3.sign(self.pqc_secret_key, msg_bytes)
+            sig_bytes = Dilithium2.sign(self.pqc_secret_key, msg_bytes)
             signature = base64.b64encode(sig_bytes).decode()
-            algorithm = "CRYSTALS-DILITHIUM3"
+            algorithm = "CRYSTALS-DILITHIUM2"
         else:
             signature = hashlib.sha512(msg_bytes).hexdigest()
             algorithm = "SHA512-SIM"
@@ -264,7 +264,7 @@ class Vehicle:
             sig      = base64.b64decode(msg["signature"])
             pub_key  = base64.b64decode(msg["public_key"])
             msg_bytes = json.dumps(msg["data"], sort_keys=True).encode()
-            return Dilithium3.verify(pub_key, msg_bytes, sig)
+            return Dilithium2.verify(pub_key, msg_bytes, sig)
         except Exception:
             return False
 
@@ -293,18 +293,18 @@ class Vehicle:
         }
 
         if PQC_AVAILABLE:
-            pk, sk = Dilithium3.keygen()
+            pk, sk = Dilithium2.keygen()
             t0 = time.perf_counter()
             for _ in range(iterations):
-                Dilithium3.sign(sk, payload)
+                Dilithium2.sign(sk, payload)
             dil_ms     = (time.perf_counter() - t0) / iterations * 1000
-            sample_dil = Dilithium3.sign(sk, payload)
-            results["CRYSTALS-DILITHIUM3"] = {
+            sample_dil = Dilithium2.sign(sk, payload)
+            results["CRYSTALS-DILITHIUM2"] = {
                 "sign_ms":            round(dil_ms, 3),
                 "sig_size_bytes":     len(sample_dil),
                 "pub_key_size_bytes": len(pk),
                 "quantum_safe":       True,
-                "security_level":     "NIST Level 3",
+                "security_level":     "NIST Level 2",
             }
 
         return results
@@ -358,7 +358,7 @@ def main():
     parser.add_argument("--id",        type=int, required=True)
     parser.add_argument("--ra-url",    default="http://localhost:5003")
     parser.add_argument("--benchmark", action="store_true",
-                        help="Run ECDSA vs Dilithium3 benchmark and exit")
+                        help="Run ECDSA vs Dilithium2 benchmark and exit")
     args = parser.parse_args()
 
     logging.basicConfig(

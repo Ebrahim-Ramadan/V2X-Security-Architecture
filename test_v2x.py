@@ -3,7 +3,7 @@ V2X Architecture Integration Tests
 
 Covers:
   - Real ECDSA-P256 CAM sign / verify
-  - Real CRYSTALS-Dilithium3 DENM sign / verify
+  - Real CRYSTALS-Dilithium2 DENM sign / verify
   - Tamper detection (signature rejection)
   - Crypto benchmark output
   - All 7 vehicle profiles (type, position, events)
@@ -42,12 +42,12 @@ def test_denm_real_dilithium3():
     assert msg["crypto"] == "post_quantum"
 
     if PQC_AVAILABLE:
-        assert msg["pqc_algorithm"] == "CRYSTALS-DILITHIUM3"
+        assert msg["pqc_algorithm"] == "CRYSTALS-DILITHIUM2"
         import base64
         sig_len = len(base64.b64decode(msg["signature"]))
-        assert sig_len > 3000, f"Dilithium3 sig should be ~3293B, got {sig_len}B"
+        assert sig_len > 2000, f"Dilithium2 sig should be ~2420B, got {sig_len}B"
         assert v.verify_denm(denm_json) is True
-        print("  PASS  DENM CRYSTALS-Dilithium3 sign/verify")
+        print("  PASS  DENM CRYSTALS-Dilithium2 sign/verify")
     else:
         print("  SKIP  dilithium-py not installed")
 
@@ -78,13 +78,13 @@ def test_benchmark():
     assert ecdsa["quantum_safe"] is False
 
     if PQC_AVAILABLE:
-        dil = results["CRYSTALS-DILITHIUM3"]
-        assert dil["sig_size_bytes"] > 3000
+        dil = results["CRYSTALS-DILITHIUM2"]
+        assert dil["sig_size_bytes"] > 2000
         assert dil["quantum_safe"] is True
         print(
             f"  PASS  Benchmark: "
             f"ECDSA={ecdsa['sign_ms']}ms/{ecdsa['sig_size_bytes']}B  "
-            f"Dilithium3={dil['sign_ms']}ms/{dil['sig_size_bytes']}B"
+            f"Dilithium2={dil['sign_ms']}ms/{dil['sig_size_bytes']}B"
         )
     else:
         print(f"  PASS  Benchmark (ECDSA only): {ecdsa['sign_ms']}ms/{ecdsa['sig_size_bytes']}B")
@@ -209,7 +209,7 @@ def test_pca_cert_issuance():
 
 TESTS = [
     ("CAM ECDSA sign/verify",          test_cam_real_ecdsa),
-    ("DENM Dilithium3 sign/verify",    test_denm_real_dilithium3),
+    ("DENM Dilithium2 sign/verify",    test_denm_real_dilithium3),
     ("Tamper detection",               test_tamper_detection),
     ("Crypto benchmark",               test_benchmark),
     ("All 7 vehicle profiles",         test_all_vehicle_profiles),
